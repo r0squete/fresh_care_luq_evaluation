@@ -10,6 +10,7 @@ from pathlib import Path
 
 os.environ["NUMBA_THREADING_LAYER"] = "workqueue"
 import numpy as np
+import pandas as pd
 
 from config import DATASETS, DRIFTER_COLUMNS, DRIFTERS_PATH, EVAL_PARAMS, OUTPUT_PATH
 from utils import (
@@ -336,6 +337,7 @@ def run_evaluation(
                 for tau_sec in tau_secs:
                     luq_values = []
                     valid_fracs = []
+                    individual_calculations = []  # Store individual calculations
                     n_cases = 0
 
                     # Loop through all drifter positions
@@ -379,6 +381,22 @@ def run_evaluation(
                             luq_values.append(luq_mean_km)
                             valid_fracs.append(valid_frac)
                             n_cases += 1
+                            
+                            # Store individual calculation for CSV
+                            L_char = LUQ_results[drifter_idx]["L_characteristic_km"]
+                            luq_normalized = luq_mean_km / L_char if L_char > 0 else np.nan
+                            
+                            # Convert time to datetime for CSV
+                            t0_datetime = pd.to_datetime(
+                                t0_sec, origin='1950-01-01', unit='s'
+                            )  # Proper conversion from 1950 epoch
+                            
+                            individual_calculations.append({
+                                "t0_datetime": t0_datetime,
+                                "luq_km": luq_mean_km,
+                                "luq_normalized": luq_normalized,
+                                "valid_frac": valid_frac
+                            })
 
                     # Aggregate results for this drifter-dataset-r_km-tau combination
                     if n_cases > 0:
@@ -398,6 +416,7 @@ def run_evaluation(
                         "luq_normalized": luq_normalized,
                         "valid_frac": valid_frac_over_cases,
                         "n_cases": n_cases,
+                        "individual_calculations": individual_calculations,  # Add individual data
                     }
 
     # 4) Save results
