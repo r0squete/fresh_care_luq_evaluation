@@ -144,15 +144,25 @@ def prep_dataset(
     # absolute seconds since epoch (int64)
     time_sec = to_epoch_seconds_datetime64(time)
 
-    lat_rad = np.deg2rad(lat.astype(np.float32, copy=False)).astype(
-        np.float32, copy=False
+    lat_rad = (
+        np.deg2rad(lat.astype(np.float32, copy=False))
+        .astype(np.float32, copy=False)
+        .squeeze()
     )
-    lon_rad = np.deg2rad(lon.astype(np.float32, copy=False)).astype(
-        np.float32, copy=False
+    lon_rad = (
+        np.deg2rad(lon.astype(np.float32, copy=False))
+        .astype(np.float32, copy=False)
+        .squeeze()
     )
 
     u = ds[u_name].values.astype(np.float32, copy=False)
     v = ds[v_name].values.astype(np.float32, copy=False)
+
+    # Check if dimensions need transposing
+    if u.shape[1] == len(lon) and u.shape[2] == len(lat):
+        print("  INFO: Transposing from (time,lon,lat) to (time,lat,lon)")
+        u = u.transpose(0, 2, 1)
+        v = v.transpose(0, 2, 1)
 
     R = np.float32(6371000.0)
     coslat = np.cos(lat_rad)
@@ -767,27 +777,35 @@ def luq_case(
 
 def save_results_csv(results, output_dir, tau_days, r_kms):
     """
-    Save results as CSV - one per drifter.
+    Save results as CSV - one per drifter with structure:
+    - Summary section at top
+    - Time series section at bottom, grouped by dataset/r_km/tau
 
-    Inputs:
-    -------
-    results: dict
-        The evaluation results to save.
-    output_dir: str
-        The directory to save the CSV files.
-    tau_days: list
-        The list of tau values in days.
-    r_kms: list
-        The list of radius values in kilometers.
+    Parameters:
+    -----------
+    results : dict
+        The evaluation results to save
+    output_dir : str
+        The directory to save the CSV files
+    tau_days : list
+        The list of tau values in days
+    r_kms : list
+        The list of radius values in kilometers
     """
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
     for drifter_idx, drifter_results in results.items():
-        rows = []
+        if not isinstance(drifter_idx, int):  # Skip metadata entries
+            continue
+
         filename = drifter_results["filename"]
         L_char = drifter_results["L_characteristic_km"]
 
+        all_rows = []
+
+        # === SUMMARY SECTION ===
+        summary_rows = []
         for dataset_name in drifter_results.keys():
             if dataset_name in ["filename", "L_characteristic_km"]:
                 continue
@@ -796,14 +814,21 @@ def save_results_csv(results, output_dir, tau_days, r_kms):
                 for tau_day in tau_days:
                     tau_sec = np.int64(tau_day * 24 * 3600)
 
-                    if tau_sec in drifter_results[dataset_name][r_km]:
+                    if (
+                        r_km in drifter_results[dataset_name]
+                        and tau_sec in drifter_results[dataset_name][r_km]
+                    ):
                         data = drifter_results[dataset_name][r_km][tau_sec]
-                        rows.append(
+                        summary_rows.append(
                             {
+                                "data_type": "summary",
+                                "drifter_id": drifter_idx,
+                                "drifter_filename": filename,
                                 "dataset": dataset_name,
-                                "tau_days": tau_day,
                                 "r_km": r_km,
-                                "luq_mean_km": data["luq_mean_km"],
+                                "tau_days": tau_day,
+                                "t0_datetime": "",  # Empty for summary
+                                "luq_km": data["luq_mean_km"],
                                 "luq_normalized": data["luq_normalized"],
                                 "valid_frac": data["valid_frac"],
                                 "n_cases": data["n_cases"],
@@ -811,11 +836,56 @@ def save_results_csv(results, output_dir, tau_days, r_kms):
                             }
                         )
 
-        if rows:
-            df = pd.DataFrame(rows)
+        all_rows.extend(summary_rows)
+
+        # === TIME SERIES SECTION ===
+        for dataset_name in drifter_results.keys():
+            if dataset_name in ["filename", "L_characteristic_km"]:
+                continue
+
+            for r_km in r_kms:
+                for tau_day in tau_days:
+                    tau_sec = np.int64(tau_day * 24 * 3600)
+
+                    if (
+                        r_km in drifter_results[dataset_name]
+                        and tau_sec in drifter_results[dataset_name][r_km]
+                    ):
+                        data = drifter_results[dataset_name][r_km][tau_sec]
+                        individual_calcs = data.get("individual_calculations", [])
+
+                        for calc in individual_calcs:
+                            all_rows.append(
+                                {
+                                    "data_type": "timeseries",
+                                    "drifter_id": drifter_idx,
+                                    "drifter_filename": filename,
+                                    "dataset": dataset_name,
+                                    "r_km": r_km,
+                                    "tau_days": tau_day,
+                                    "t0_datetime": calc["t0_datetime"].strftime(
+                                        "%Y-%m-%d %H:%M:%S"
+                                    ),
+                                    "luq_km": calc["luq_km"],
+                                    "luq_normalized": calc["luq_normalized"],
+                                    "valid_frac": calc["valid_frac"],
+                                    "n_cases": "",  # Empty for individual points
+                                    "L_characteristic_km": L_char,
+                                }
+                            )
+
+        if all_rows:
+            df = pd.DataFrame(all_rows)
             output_file = (
                 output_path
-                / f"drifter_{drifter_idx:03d}_{filename.replace('.csv', '')}.csv"
+                / f"luq_results_drifter_{drifter_idx:03d}_{filename.replace('.csv', '')}.csv"
             )
-            df.to_csv(output_file, index=False)
-            print(f"  ✓ {output_file.name}")
+            df.to_csv(output_file, index=False, float_format="%.6f")
+
+            n_summary = len([r for r in all_rows if r["data_type"] == "summary"])
+            n_timeseries = len([r for r in all_rows if r["data_type"] == "timeseries"])
+            print(
+                f"  ✓ {output_file.name} ({n_summary} summary + {n_timeseries} timeseries records)"
+            )
+
+    print(f"\n Expanded CSV results saved to: {output_dir}")

@@ -47,6 +47,22 @@ DATASETS = {
         "lat_name": "latitude",
         "lon_name": "longitude",
     },
+    "ADT-0.25": {
+        "path": "/home/rosquete/Documents/FRESH-CARE/data/fusion_evaluation/ana_evaluation/currents/ADT-0.05",
+        "u_name": "ugos",
+        "v_name": "vgos",
+        "time_name": "time",
+        "lat_name": "lat",
+        "lon_name": "lon",
+    },
+    "OSCAR": {
+        "path": "/home/rosquete/Documents/FRESH-CARE/data/other_datasets/OSCAR/data/selected_region",
+        "u_name": "u",
+        "v_name": "v",
+        "time_name": "time",
+        "lat_name": "lat",
+        "lon_name": "lon",
+    },
 }
 
 
