@@ -35,53 +35,92 @@ def load_dataset_files(
     if not files:
         raise FileNotFoundError(f"No files found in {dataset_path}")
 
-    # If no time filtering, load all files
     if eval_start is None and eval_end is None:
         return xr.open_mfdataset(files, combine="by_coords")
 
-    # Calculate required time range
+    # Calculate time range
     if eval_start:
         start_dt = pd.to_datetime(eval_start, utc=True)
-        start_year = start_dt.year
     else:
-        start_year = None
+        start_dt = None
 
     if eval_end:
         end_dt = pd.to_datetime(eval_end, utc=True)
-        # Add tau_max buffer in days
         if tau_max_sec:
-            end_dt += pd.Timedelta(seconds=tau_max_sec)
-        end_year = end_dt.year
+            # Buffer = tau_max converted to days
+            tau_max_days = tau_max_sec / (24 * 3600)
+            end_dt_buffered = end_dt + pd.Timedelta(days=tau_max_days)
+        else:
+            end_dt_buffered = end_dt
     else:
-        end_year = None
+        end_dt_buffered = None
 
-    # Filter files by date if naming convention allows
+    # Filter files by date
     filtered_files = []
     for file in files:
         filename = Path(file).name
 
-        # Try to extract date from filename (common patterns)
-        # Pattern 1: YYYY or YYYYMM in filename
+        date_patterns = [
+            r"(\d{4})(\d{2})(\d{2})",
+            r"(\d{4})-(\d{2})-(\d{2})",
+            r"(\d{4})_(\d{2})_(\d{2})",
+        ]
 
-        year_match = re.search(r"(\d{4})", filename)
-        if year_match:
-            file_year = int(year_match.group(1))
+        file_date = None
+        for pattern in date_patterns:
+            match = re.search(pattern, filename)
+            if match:
+                year, month, day = match.groups()
+                try:
+                    file_date = pd.to_datetime(f"{year}-{month}-{day}", utc=True)
+                    break
+                except ValueError:
+                    continue
 
-            # Simple year-based filtering
-            include_file = True
-            if start_year and file_year < start_year:
-                include_file = False
-            if end_year and file_year > end_year:
-                include_file = False
-
-            if include_file:
+        if file_date is None:
+            year_match = re.search(r"(\d{4})", filename)
+            if year_match:
+                file_year = int(year_match.group(1))
+                target_year = (
+                    start_dt.year if start_dt else end_dt.year if end_dt else file_year
+                )
+                if abs(file_year - target_year) <= 1:
+                    filtered_files.append(file)
+            else:
                 filtered_files.append(file)
-        else:
-            # If can't parse date, include file
+            continue
+
+        include_file = True
+        if start_dt and file_date < start_dt:
+            include_file = False
+        if end_dt_buffered and file_date > end_dt_buffered:
+            include_file = False
+
+        if include_file:
             filtered_files.append(file)
 
-    # Use filtered files or all if filtering didn't work
     files_to_load = filtered_files if filtered_files else files
+
+    # Check for excessive files
+    expected_days = 45
+    if len(files_to_load) > expected_days and len(files) > 100:
+        restrictive_files = []
+        for file in files:
+            filename = Path(file).name
+            for pattern in [r"(\d{4})(\d{2})(\d{2})", r"(\d{4})-(\d{2})-(\d{2})"]:
+                match = re.search(pattern, filename)
+                if match:
+                    year, month, day = match.groups()
+                    try:
+                        file_date = pd.to_datetime(f"{year}-{month}-{day}")
+                        if start_dt <= file_date <= end_dt_buffered:
+                            restrictive_files.append(file)
+                            break
+                    except ValueError:
+                        continue
+
+        if len(restrictive_files) > 0 and len(restrictive_files) < len(files_to_load):
+            files_to_load = restrictive_files
 
     print(f"  Loading {len(files_to_load)} of {len(files)} files")
     return xr.open_mfdataset(files_to_load, combine="by_coords")
