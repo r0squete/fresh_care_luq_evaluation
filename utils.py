@@ -30,100 +30,47 @@ def load_dataset_files(
 ):
     """
     Load and concatenate dataset files for specified time range.
+    Assumes filenames contain YYYYMMDD and each file is daily.
     """
     files = sorted(glob.glob(str(Path(dataset_path) / pattern)))
     if not files:
         raise FileNotFoundError(f"No files found in {dataset_path}")
 
+    # If no range, load all
     if eval_start is None and eval_end is None:
         return xr.open_mfdataset(files, combine="by_coords")
 
-    # Calculate time range
-    if eval_start:
-        start_dt = pd.to_datetime(eval_start, utc=True)
+    # Calculate date range
+    start_dt = pd.to_datetime(eval_start, utc=True) if eval_start else None
+    end_dt = pd.to_datetime(eval_end, utc=True) if eval_end else None
+    if tau_max_sec:
+        tau_days = int(np.ceil(tau_max_sec / (24 * 3600)))
+        end_dt_buffered = end_dt + pd.Timedelta(days=tau_days)
     else:
-        start_dt = None
+        end_dt_buffered = end_dt
 
-    if eval_end:
-        end_dt = pd.to_datetime(eval_end, utc=True)
-        if tau_max_sec:
-            # Buffer = tau_max converted to days
-            tau_max_days = tau_max_sec / (24 * 3600)
-            end_dt_buffered = end_dt + pd.Timedelta(days=tau_max_days)
-        else:
-            end_dt_buffered = end_dt
-    else:
-        end_dt_buffered = None
-
-    # Filter files by date
     filtered_files = []
     for file in files:
         filename = Path(file).name
-
-        date_patterns = [
-            r"(\d{4})(\d{2})(\d{2})",
-            r"(\d{4})-(\d{2})-(\d{2})",
-            r"(\d{4})_(\d{2})_(\d{2})",
-        ]
-
-        file_date = None
-        for pattern in date_patterns:
-            match = re.search(pattern, filename)
-            if match:
-                year, month, day = match.groups()
-                try:
-                    file_date = pd.to_datetime(f"{year}-{month}-{day}", utc=True)
-                    break
-                except ValueError:
-                    continue
-
-        if file_date is None:
-            year_match = re.search(r"(\d{4})", filename)
-            if year_match:
-                file_year = int(year_match.group(1))
-                target_year = (
-                    start_dt.year if start_dt else end_dt.year if end_dt else file_year
-                )
-                if abs(file_year - target_year) <= 1:
-                    filtered_files.append(file)
-            else:
-                filtered_files.append(file)
+        match = re.search(r"(\d{4})(\d{2})(\d{2})", filename)
+        if match:
+            year, month, day = match.groups()
+            file_date = pd.to_datetime(f"{year}-{month}-{day}", utc=True)
+            # Only load files in range
+            if start_dt and file_date < start_dt:
+                continue
+            if end_dt_buffered and file_date > end_dt_buffered:
+                continue
+            filtered_files.append(file)
+        else:
+            # If no date found, skip file
             continue
 
-        include_file = True
-        if start_dt and file_date < start_dt:
-            include_file = False
-        if end_dt_buffered and file_date > end_dt_buffered:
-            include_file = False
+    if not filtered_files:
+        raise FileNotFoundError("No files found in date range")
 
-        if include_file:
-            filtered_files.append(file)
-
-    files_to_load = filtered_files if filtered_files else files
-
-    # Check for excessive files
-    expected_days = 45
-    if len(files_to_load) > expected_days and len(files) > 100:
-        restrictive_files = []
-        for file in files:
-            filename = Path(file).name
-            for pattern in [r"(\d{4})(\d{2})(\d{2})", r"(\d{4})-(\d{2})-(\d{2})"]:
-                match = re.search(pattern, filename)
-                if match:
-                    year, month, day = match.groups()
-                    try:
-                        file_date = pd.to_datetime(f"{year}-{month}-{day}")
-                        if start_dt <= file_date <= end_dt_buffered:
-                            restrictive_files.append(file)
-                            break
-                    except ValueError:
-                        continue
-
-        if len(restrictive_files) > 0 and len(restrictive_files) < len(files_to_load):
-            files_to_load = restrictive_files
-
-    print(f"  Loading {len(files_to_load)} of {len(files)} files")
-    return xr.open_mfdataset(files_to_load, combine="by_coords")
+    print(f"  Loading {len(filtered_files)} of {len(files)} files")
+    return xr.open_mfdataset(filtered_files, combine="by_coords")
 
 
 def load_drifter_file(drifter_file):
@@ -814,7 +761,7 @@ def luq_case(
         )
 
 
-def save_results_csv(results, output_dir, tau_days, r_kms):
+def save_results_csv(results, output_dir, tau_days, r_kms, eval_start=None):
     """
     Save results as CSV - one per drifter with structure:
     - Summary section at top
@@ -830,6 +777,8 @@ def save_results_csv(results, output_dir, tau_days, r_kms):
         The list of tau values in days
     r_kms : list
         The list of radius values in kilometers
+    eval_start : str, optional
+        The evaluation start date (YYYY-MM-DD) to include in the filename
     """
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -840,6 +789,9 @@ def save_results_csv(results, output_dir, tau_days, r_kms):
 
         filename = drifter_results["filename"]
         L_char = drifter_results["L_characteristic_km"]
+
+        # Get date string for output filename
+        date_str = str(eval_start)
 
         all_rows = []
 
@@ -917,9 +869,15 @@ def save_results_csv(results, output_dir, tau_days, r_kms):
             df = pd.DataFrame(all_rows)
             output_file = (
                 output_path
-                / f"luq_results_drifter_{drifter_idx:03d}_{filename.replace('.csv', '')}.csv"
+                / f"luq_results_drifter_{filename.replace('.csv', '')}_{date_str}.csv"
             )
-            df.to_csv(output_file, index=False, float_format="%.6f")
+            df.to_csv(
+                output_file,
+                index=False,
+                float_format="%.6f",
+                sep=";",
+                encoding="utf-8-sig",
+            )
 
             n_summary = len([r for r in all_rows if r["data_type"] == "summary"])
             n_timeseries = len([r for r in all_rows if r["data_type"] == "timeseries"])
