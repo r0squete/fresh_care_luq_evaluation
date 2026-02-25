@@ -38,7 +38,7 @@ def parse_arguments():
         "--datasets",
         nargs="+",
         choices=list(DATASETS.keys()),
-        default=None,
+        default=list(DATASETS.keys()),
         help="Datasets to evaluate (default: all configured datasets)",
     )
 
@@ -47,15 +47,16 @@ def parse_arguments():
         "--tau_days",
         nargs="+",
         type=int,
-        default=None,
+        default=EVAL_PARAMS["tau_days"],
         help=f"Integration times in days (default: {EVAL_PARAMS['tau_days']})",
     )
 
+    # Spatial parameters
     parser.add_argument(
         "--r_kms",
         nargs="+",
         type=int,
-        default=None,
+        default=EVAL_PARAMS["r_kms"],
         help=f"Neighborhood radii in km (default: {EVAL_PARAMS['r_kms']})",
     )
 
@@ -85,7 +86,7 @@ def parse_arguments():
     parser.add_argument(
         "--output_dir",
         type=str,
-        default=None,
+        default=OUTPUT_PATH,
         help=f"Output directory (default: {OUTPUT_PATH})",
     )
 
@@ -93,28 +94,28 @@ def parse_arguments():
     parser.add_argument(
         "--dt_sec",
         type=int,
-        default=None,
+        default=EVAL_PARAMS["dt_sec"],
         help=f"Integration time step in seconds (default: {EVAL_PARAMS['dt_sec']})",
     )
 
     parser.add_argument(
         "--nx",
         type=int,
-        default=None,
+        default=EVAL_PARAMS["nx"],
         help=f"Neighborhood grid points X (default: {EVAL_PARAMS['nx']})",
     )
 
     parser.add_argument(
         "--ny",
         type=int,
-        default=None,
+        default=EVAL_PARAMS["ny"],
         help=f"Neighborhood grid points Y (default: {EVAL_PARAMS['ny']})",
     )
 
     parser.add_argument(
         "--min_valid_frac",
         type=float,
-        default=None,
+        default=EVAL_PARAMS["min_valid_frac"],
         help=f"Minimum valid fraction for seeds (default: {EVAL_PARAMS['min_valid_frac']})",
     )
 
@@ -381,22 +382,26 @@ def run_evaluation(
                             luq_values.append(luq_mean_km)
                             valid_fracs.append(valid_frac)
                             n_cases += 1
-                            
+
                             # Store individual calculation for CSV
                             L_char = LUQ_results[drifter_idx]["L_characteristic_km"]
-                            luq_normalized = luq_mean_km / L_char if L_char > 0 else np.nan
-                            
+                            luq_normalized = (
+                                luq_mean_km / L_char if L_char > 0 else np.nan
+                            )
+
                             # Convert time to datetime for CSV
                             t0_datetime = pd.to_datetime(
-                                t0_sec, origin='1950-01-01', unit='s'
+                                t0_sec, origin="1950-01-01", unit="s"
                             )  # Proper conversion from 1950 epoch
-                            
-                            individual_calculations.append({
-                                "t0_datetime": t0_datetime,
-                                "luq_km": luq_mean_km,
-                                "luq_normalized": luq_normalized,
-                                "valid_frac": valid_frac
-                            })
+
+                            individual_calculations.append(
+                                {
+                                    "t0_datetime": t0_datetime,
+                                    "luq_km": luq_mean_km,
+                                    "luq_normalized": luq_normalized,
+                                    "valid_frac": valid_frac,
+                                }
+                            )
 
                     # Aggregate results for this drifter-dataset-r_km-tau combination
                     if n_cases > 0:
@@ -421,7 +426,7 @@ def run_evaluation(
 
     # 4) Save results
     print("\n=== Saving Results ===")
-    save_results_csv(LUQ_results, output_dir, tau_days, r_kms)
+    save_results_csv(LUQ_results, output_dir, tau_days, r_kms, eval_start=eval_start)
 
     return LUQ_results
 

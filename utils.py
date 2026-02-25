@@ -30,61 +30,47 @@ def load_dataset_files(
 ):
     """
     Load and concatenate dataset files for specified time range.
+    Assumes filenames contain YYYYMMDD and each file is daily.
     """
     files = sorted(glob.glob(str(Path(dataset_path) / pattern)))
     if not files:
         raise FileNotFoundError(f"No files found in {dataset_path}")
 
-    # If no time filtering, load all files
+    # If no range, load all
     if eval_start is None and eval_end is None:
         return xr.open_mfdataset(files, combine="by_coords")
 
-    # Calculate required time range
-    if eval_start:
-        start_dt = pd.to_datetime(eval_start, utc=True)
-        start_year = start_dt.year
+    # Calculate date range
+    start_dt = pd.to_datetime(eval_start, utc=True) if eval_start else None
+    end_dt = pd.to_datetime(eval_end, utc=True) if eval_end else None
+    if tau_max_sec:
+        tau_days = int(np.ceil(tau_max_sec / (24 * 3600)))
+        end_dt_buffered = end_dt + pd.Timedelta(days=tau_days)
     else:
-        start_year = None
+        end_dt_buffered = end_dt
 
-    if eval_end:
-        end_dt = pd.to_datetime(eval_end, utc=True)
-        # Add tau_max buffer in days
-        if tau_max_sec:
-            end_dt += pd.Timedelta(seconds=tau_max_sec)
-        end_year = end_dt.year
-    else:
-        end_year = None
-
-    # Filter files by date if naming convention allows
     filtered_files = []
     for file in files:
         filename = Path(file).name
-
-        # Try to extract date from filename (common patterns)
-        # Pattern 1: YYYY or YYYYMM in filename
-
-        year_match = re.search(r"(\d{4})", filename)
-        if year_match:
-            file_year = int(year_match.group(1))
-
-            # Simple year-based filtering
-            include_file = True
-            if start_year and file_year < start_year:
-                include_file = False
-            if end_year and file_year > end_year:
-                include_file = False
-
-            if include_file:
-                filtered_files.append(file)
-        else:
-            # If can't parse date, include file
+        match = re.search(r"(\d{4})(\d{2})(\d{2})", filename)
+        if match:
+            year, month, day = match.groups()
+            file_date = pd.to_datetime(f"{year}-{month}-{day}", utc=True)
+            # Only load files in range
+            if start_dt and file_date < start_dt:
+                continue
+            if end_dt_buffered and file_date > end_dt_buffered:
+                continue
             filtered_files.append(file)
+        else:
+            # If no date found, skip file
+            continue
 
-    # Use filtered files or all if filtering didn't work
-    files_to_load = filtered_files if filtered_files else files
+    if not filtered_files:
+        raise FileNotFoundError("No files found in date range")
 
-    print(f"  Loading {len(files_to_load)} of {len(files)} files")
-    return xr.open_mfdataset(files_to_load, combine="by_coords")
+    print(f"  Loading {len(filtered_files)} of {len(files)} files")
+    return xr.open_mfdataset(filtered_files, combine="by_coords")
 
 
 def load_drifter_file(drifter_file):
@@ -775,7 +761,7 @@ def luq_case(
         )
 
 
-def save_results_csv(results, output_dir, tau_days, r_kms):
+def save_results_csv(results, output_dir, tau_days, r_kms, eval_start=None):
     """
     Save results as CSV - one per drifter with structure:
     - Summary section at top
@@ -791,6 +777,8 @@ def save_results_csv(results, output_dir, tau_days, r_kms):
         The list of tau values in days
     r_kms : list
         The list of radius values in kilometers
+    eval_start : str, optional
+        The evaluation start date (YYYY-MM-DD) to include in the filename
     """
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -801,6 +789,9 @@ def save_results_csv(results, output_dir, tau_days, r_kms):
 
         filename = drifter_results["filename"]
         L_char = drifter_results["L_characteristic_km"]
+
+        # Get date string for output filename
+        date_str = str(eval_start)
 
         all_rows = []
 
@@ -878,9 +869,15 @@ def save_results_csv(results, output_dir, tau_days, r_kms):
             df = pd.DataFrame(all_rows)
             output_file = (
                 output_path
-                / f"luq_results_drifter_{drifter_idx:03d}_{filename.replace('.csv', '')}.csv"
+                / f"luq_results_drifter_{filename.replace('.csv', '')}_{date_str}.csv"
             )
-            df.to_csv(output_file, index=False, float_format="%.6f")
+            df.to_csv(
+                output_file,
+                index=False,
+                float_format="%.6f",
+                sep=";",
+                encoding="utf-8-sig",
+            )
 
             n_summary = len([r for r in all_rows if r["data_type"] == "summary"])
             n_timeseries = len([r for r in all_rows if r["data_type"] == "timeseries"])
