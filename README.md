@@ -41,7 +41,7 @@ Edit config.py to modify:
 - numba
 
 ## Installation
-git clone https://github.com/yourusername/fresh-care-luq-evaluation.git
+git clone https://github.com/r0squete/fresh-care-luq-evaluation.git
 cd fresh-care-luq-evaluation
 pip install -r requirements.txt
 
