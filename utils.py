@@ -20,6 +20,15 @@ from config import EPOCH, LAT_MAX, R_EARTH
 def to_epoch_seconds_datetime64(t64, epoch=EPOCH):
     """
     Convert datetime64 to seconds since epoch.
+
+    Inputs
+    ------
+    t64   : numpy.datetime64 array
+    epoch : numpy.datetime64, reference epoch
+
+    Returns
+    -------
+    numpy.int64 array
     """
     t64s = t64.astype("datetime64[s]")
     return (t64s - epoch).astype("timedelta64[s]").astype(np.int64)
@@ -29,25 +38,32 @@ def load_dataset_files(
     dataset_path, pattern="*.nc", eval_start=None, eval_end=None, tau_max_sec=None
 ):
     """
-    Load and concatenate dataset files for specified time range.
-    Assumes filenames contain YYYYMMDD and each file is daily.
+    Load and concatenate NetCDF files for a given date range.
+    Filenames must contain YYYYMMDD. Loads eval window + tau_max buffer.
+
+    Inputs
+    ------
+    dataset_path : str or Path
+    pattern      : str, glob pattern (default "*.nc")
+    eval_start   : str "YYYY-MM-DD", start of evaluation window (required)
+    eval_end     : str "YYYY-MM-DD", end of evaluation window (required)
+    tau_max_sec  : int, max integration time in seconds — extends end buffer
+
+    Returns
+    -------
+    xarray.Dataset
     """
     files = sorted(glob.glob(str(Path(dataset_path) / pattern)))
     if not files:
         raise FileNotFoundError(f"No files found in {dataset_path}")
 
-    # If no range, load all
-    if eval_start is None and eval_end is None:
-        return xr.open_mfdataset(files, combine="by_coords")
+    start_dt = pd.to_datetime(eval_start, utc=True)
+    end_dt = pd.to_datetime(eval_end, utc=True)
 
-    # Calculate date range
-    start_dt = pd.to_datetime(eval_start, utc=True) if eval_start else None
-    end_dt = pd.to_datetime(eval_end, utc=True) if eval_end else None
-    if tau_max_sec:
-        tau_days = int(np.ceil(tau_max_sec / (24 * 3600)))
-        end_dt_buffered = end_dt + pd.Timedelta(days=tau_days)
-    else:
-        end_dt_buffered = end_dt
+    # +1 day buffer: _find_index_uniform needs i < n-1, the field must have
+    # one timestep beyond t0+τ for the final RK4 k4 evaluation.
+    tau_days_buf = int(np.ceil(tau_max_sec / (24 * 3600))) if tau_max_sec else 0
+    end_dt_buffered = end_dt + pd.Timedelta(days=tau_days_buf + 1)
 
     filtered_files = []
     for file in files:
@@ -56,15 +72,11 @@ def load_dataset_files(
         if match:
             year, month, day = match.groups()
             file_date = pd.to_datetime(f"{year}-{month}-{day}", utc=True)
-            # Only load files in range
-            if start_dt and file_date < start_dt:
+            if file_date < start_dt:
                 continue
-            if end_dt_buffered and file_date > end_dt_buffered:
+            if file_date > end_dt_buffered:
                 continue
             filtered_files.append(file)
-        else:
-            # If no date found, skip file
-            continue
 
     if not filtered_files:
         raise FileNotFoundError("No files found in date range")
@@ -75,7 +87,17 @@ def load_dataset_files(
 
 def load_drifter_file(drifter_file):
     """
-    Load single drifter CSV file.
+    Load a drifter CSV file (NOAA GDP format, 6-header-line).
+    Columns: time, latitude, longitude, ve, vn, err_ve, err_vn,
+             sst, err_sst, flg_sst, speed, direction.
+
+    Inputs
+    ------
+    drifter_file : str or Path
+
+    Returns
+    -------
+    pandas.DataFrame
     """
     df = pd.read_csv(
         drifter_file,
@@ -110,17 +132,24 @@ def prep_dataset(
     keep_uv=False,
 ):
     """
-    Currents dataset preparation + angular conversion on the grid.
+    Prepare a currents dataset for advection: convert to epoch seconds,
+    radians, and angular velocities (rad/s). Handles (time,lon,lat) →
+    (time,lat,lon) transposition and [0,360] → [-180,180] normalization.
 
-    Always returns:
-      - time_sec (int64): seconds since epoch 1950-01-01
-      - lat_rad, lon_rad (float32): radians
-      - lon_dot, lat_dot (float32): rad/s on grid
+    Inputs
+    ------
+    ds        : xarray.Dataset
+    u_name    : str, zonal velocity variable name
+    v_name    : str, meridional velocity variable name
+    time_name : str
+    lat_name  : str
+    lon_name  : str
+    keep_uv   : bool, if True also stores raw u, v (m/s) under keys "u" and "v"
 
-    Optionally returns u,v (float32) if keep_uv=True.
-
-    Output dict keys:
-      time_sec, lat_rad, lon_rad, lon_dot, lat_dot, (optional) u, v
+    Returns
+    -------
+    dict with keys: time_sec, lat_rad, lon_rad, lon_dot, lat_dot
+                    and optionally u, v (only if keep_uv=True)
     """
     # coords
     time = ds[time_name].values
@@ -130,39 +159,37 @@ def prep_dataset(
     # absolute seconds since epoch (int64)
     time_sec = to_epoch_seconds_datetime64(time)
 
-    lat_rad = (
-        np.deg2rad(lat.astype(np.float32, copy=False))
-        .astype(np.float32, copy=False)
-        .squeeze()
-    )
-    lon_rad = (
-        np.deg2rad(lon.astype(np.float32, copy=False))
-        .astype(np.float32, copy=False)
-        .squeeze()
-    )
+    lat_rad = np.deg2rad(lat).astype(np.float32).squeeze()
+    lon_rad = np.deg2rad(lon).astype(np.float32).squeeze()
 
     u = ds[u_name].values.astype(np.float32, copy=False)
     v = ds[v_name].values.astype(np.float32, copy=False)
 
-    # Check if dimensions need transposing
+    # Check if dimensions need transposing before longitude normalization
     if u.shape[1] == len(lon) and u.shape[2] == len(lat):
         print("  INFO: Transposing from (time,lon,lat) to (time,lat,lon)")
         u = u.transpose(0, 2, 1)
         v = v.transpose(0, 2, 1)
 
-    R = np.float32(6371000.0)
+    # Normalize longitudes to [-pi, pi] in case dataset uses [0, 2pi] convention
+    if lon_rad.max() > np.pi:
+        lon_rad = (lon_rad + np.pi).astype(np.float32) % (2 * np.pi) - np.pi
+        # After wrapping, sort to ensure monotonically increasing order for interpolation
+        sort_idx = np.argsort(lon_rad)
+        lon_rad = lon_rad[sort_idx]
+        u = u[:, :, sort_idx]
+        v = v[:, :, sort_idx]
+        print("  INFO: Longitudes converted from [0,360] to [-180,180] and sorted")
+
     coslat = np.cos(lat_rad)
     coslat = np.maximum(coslat, np.float32(1e-6))
 
-    lon_dot = u / (R * coslat[None, :, None])  # rad/s
-    lat_dot = v / R  # rad/s
-
     out = {
-        "time_sec": time_sec,  # int64
+        "time_sec": time_sec,
         "lat_rad": lat_rad,
         "lon_rad": lon_rad,
-        "lon_dot": lon_dot.astype(np.float32, copy=False),
-        "lat_dot": lat_dot.astype(np.float32, copy=False),
+        "lon_dot": (u / (R_EARTH * coslat[None, :, None])).astype(np.float32),  # rad/s
+        "lat_dot": (v / R_EARTH).astype(np.float32),  # rad/s
     }
     if keep_uv:
         out["u"] = u
@@ -172,16 +199,18 @@ def prep_dataset(
 
 def prep_drifter(df, time_col="time", lon_col="longitude", lat_col="latitude"):
     """
-    Drifter prep:
-      - time -> int64 seconds since epoch 1950-01-01
-      - lon/lat (deg) -> float32 radians
+    Prepare drifter data: convert time to epoch seconds and lon/lat to radians.
 
-    Returns dict:
-      {
-        "time_sec": int64 (n,)
-        "lon_rad":  float32 (n,)
-        "lat_rad":  float32 (n,)
-      }
+    Inputs
+    ------
+    df        : pandas.DataFrame
+    time_col  : str, time column name
+    lon_col   : str, longitude column name
+    lat_col   : str, latitude column name
+
+    Returns
+    -------
+    dict with keys: time_sec, lon_rad, lat_rad
     """
     t_pd = pd.to_datetime(df[time_col], utc=True, errors="raise")
     t64 = t_pd.dt.tz_convert(None).to_numpy(dtype="datetime64[s]")
@@ -191,84 +220,73 @@ def prep_drifter(df, time_col="time", lon_col="longitude", lat_col="latitude"):
     lon = df[lon_col].to_numpy(dtype=np.float32)
     lat = df[lat_col].to_numpy(dtype=np.float32)
 
-    lon_rad = np.deg2rad(lon).astype(np.float32, copy=False)
-    lat_rad = np.deg2rad(lat).astype(np.float32, copy=False)
+    lon_rad = np.deg2rad(lon, dtype=np.float32)
+    lat_rad = np.deg2rad(lat, dtype=np.float32)
 
     return {"time_sec": time_sec, "lon_rad": lon_rad, "lat_rad": lat_rad}
 
 
-def validate_temporal_coverage(drifter_data, field_data, tau_max_sec):
+def filter_by_temporal_range(
+    drifter_data,
+    eval_start,
+    eval_end,
+    tau_max_sec,
+    field_start_sec=None,
+    field_end_sec=None,
+):
     """
-    Simple validation: check if drifter+tau_max fits within field data
+    Filter drifter data to the intersection of evaluation and field time ranges.
+    eval_start, eval_end and tau_max_sec are required.
 
-    Returns:
-    --------
-    is_valid : bool
-    message : str
+    Inputs
+    ------
+    drifter_data   : dict with keys time_sec, lon_rad, lat_rad
+    eval_start     : str "YYYY-MM-DD", evaluation window start (required)
+    eval_end       : str "YYYY-MM-DD", evaluation window end (required)
+    tau_max_sec    : int, integration window length in seconds (required)
+    field_start_sec: int64, field start in epoch seconds (optional)
+    field_end_sec  : int64, field end in epoch seconds (optional)
+
+    Returns
+    -------
+    dict with filtered keys or None if no usable data
     """
-    drifter_start = drifter_data["time_sec"][0]
-    drifter_end = drifter_data["time_sec"][-1]
-    field_start = field_data["time_sec"][0]
-    field_end = field_data["time_sec"][-1]
-
-    # Need drifter to start after field starts
-    if drifter_start < field_start:
-        return False, "Drifter starts before field data"
-
-    # Need drifter+tau_max to end before field ends
-    required_end = drifter_end + tau_max_sec
-    if required_end > field_end:
-        return (
-            False,
-            f"Need field data until {required_end}, only have until {field_end}",
-        )
-
-    # Simple overlap check
-    overlap_days = (field_end - drifter_start) / (24 * 3600)
-    return True, f"OK: {overlap_days:.1f} days available"
-
-
-def filter_by_temporal_range(drifter_data, eval_start=None, eval_end=None):
-    """
-    Filter drifter data by temporal range
-
-    Parameters:
-    -----------
-    drifter_data : dict
-        Prepared drifter data with 'time_sec' key
-    eval_start : str, optional
-        Start date "YYYY-MM-DD"
-    eval_end : str, optional
-        End date "YYYY-MM-DD"
-
-    Returns:
-    --------
-    filtered_data : dict or None
-        Filtered drifter data, None if no data in range
-    """
-    if eval_start is None and eval_end is None:
-        return drifter_data  # No filtering needed
-
     time_sec = drifter_data["time_sec"]
 
-    # Convert string dates to epoch seconds
-    if eval_start:
-        start_dt = pd.to_datetime(eval_start, utc=True)
-        start_sec = to_epoch_seconds_datetime64(np.array([start_dt]))[0]
-    else:
-        start_sec = time_sec[0]
+    # Eval window boundaries
+    start_dt = pd.to_datetime(eval_start, utc=True)
+    eval_start_sec = to_epoch_seconds_datetime64(
+        np.array([start_dt.tz_convert(None)], dtype="datetime64[s]")
+    )[0]
 
-    if eval_end:
-        end_dt = pd.to_datetime(eval_end, utc=True)
-        end_sec = to_epoch_seconds_datetime64(np.array([end_dt]))[0]
-    else:
-        end_sec = time_sec[-1]
+    end_dt = pd.to_datetime(eval_end, utc=True)
+    eval_end_sec = to_epoch_seconds_datetime64(
+        np.array([end_dt.tz_convert(None)], dtype="datetime64[s]")
+    )[0]
 
-    # Filter indices
+    # Drifter buffer: t0 can reach eval_end and drifter(t0+tau) exists.
+    # +86400s (1 day) matches the extra day loaded in load_dataset_files for RK4 k4.
+    eval_end_sec = eval_end_sec + int(tau_max_sec) + 86400
+
+    # Most restrictive range: intersection with field coverage.
+    start_sec = (
+        max(eval_start_sec, field_start_sec)
+        if field_start_sec is not None
+        else eval_start_sec
+    )
+    if field_end_sec is not None:
+        end_sec = min(eval_end_sec, field_end_sec + int(tau_max_sec) + 86400)
+    else:
+        end_sec = eval_end_sec
+
+    # Field must extend at least tau_max beyond the usable start
+    if field_end_sec is not None:
+        if start_sec + tau_max_sec > field_end_sec:
+            return None
+
     mask = (time_sec >= start_sec) & (time_sec <= end_sec)
-
     if not mask.any():
-        return None  # No data in temporal range
+        return None
 
     return {
         "time_sec": time_sec[mask],
@@ -279,9 +297,16 @@ def filter_by_temporal_range(drifter_data, eval_start=None, eval_end=None):
 
 def spherical_distance_km_acos(lon1, lat1, lon2, lat2):
     """
-    Great-circle distance using spherical law of cosines.
-    Inputs in radians. Works with arrays (lon1/lat1) and scalar target (lon2/lat2).
-    Returns distance in km.
+    Compute great-circle distance using spherical law of cosines.
+
+    Inputs
+    ------
+    lon1, lat1 : float or array, radians
+    lon2, lat2 : float, radians
+
+    Returns
+    -------
+    float or array, distance in km
     """
     # cos(angle) = sinφ1 sinφ2 + cosφ1 cosφ2 cos(Δλ)
     cosang = np.sin(lat1) * np.sin(lat2) + np.cos(lat1) * np.cos(lat2) * np.cos(
@@ -296,33 +321,35 @@ def spherical_distance_km_acos(lon1, lat1, lon2, lat2):
 
 def L_characteristic_km(lon_rad, lat_rad, i0=0, i1=None, dist_fn=None):
     """
-    L = max great-circle distance between any two drifter positions
-        within the index window [i0, i1).
+    Compute L = max great-circle distance between any two drifter positions.
 
     Inputs
     ------
     lon_rad, lat_rad : 1D arrays (radians)
-    i0, i1           : window indices
-    dist_fn          : distance function returning km
-                       signature: dist_fn(lon_array, lat_array, lon_scalar, lat_scalar) -> km array
+    i0, i1           : int, window indices (default: full array)
+    dist_fn          : callable, distance function returning km
+                       (default: spherical_distance_km_acos)
 
-    Output
-    ------
-    L : float (km)
+    Returns
+    -------
+    float, L in km. Returns 0.0 if fewer than 2 points.
     """
     if i1 is None:
         i1 = len(lon_rad)
 
     if dist_fn is None:
-        dist_fn = spherical_distance_km_acos  # must return km
+        dist_fn = spherical_distance_km_acos
 
     lon = lon_rad[i0:i1]
     lat = lat_rad[i0:i1]
     n = len(lon)
 
+    if n < 2:
+        return 0.0
+
     Lmax = 0.0
     for i in range(n - 1):
-        # vectorized distances from point i to points i+1..end
+        # Vectorized distances from point i to all subsequent points
         d = dist_fn(lon[i + 1 :], lat[i + 1 :], lon[i], lat[i])
         m = np.nanmax(d)
         if m > Lmax:
@@ -337,29 +364,27 @@ def make_neighborhood(lon0_rad, lat0_rad, r_km, nx=9, ny=9):
 
     Inputs
     ------
-    lon0_rad, lat0_rad : float (radians)
-    r_km               : float
-    nx, ny             : int  (grid points)
+    lon0_rad, lat0_rad : float, center position (radians)
+    r_km               : float, half-size of the neighborhood in km
+    nx, ny             : int, number of grid points along each axis
 
-    Output
-    ------
+    Returns
+    -------
     seed_lon_rad, seed_lat_rad : float32 arrays of shape (nx*ny,)
     """
-    r_m = np.float32(r_km * 1000.0)
+    r_m = float(r_km) * 1000.0
 
-    # local metric factors (tangent plane approx)
-    coslat = np.cos(np.float64(lat0_rad))
-    if coslat < 1e-6:
-        coslat = 1e-6
+    # Tangent-plane angular half-extents
+    coslat = np.cos(float(lat0_rad))
+    coslat = max(coslat, 1e-6)  # avoid division by zero near poles
 
-    dlon = (r_m / (R_EARTH * coslat)).astype(np.float32)  # radians
-    dlat = (r_m / R_EARTH).astype(np.float32)  # radians
+    dlon = np.float32(r_m / (R_EARTH * coslat))  # radians
+    dlat = np.float32(r_m / R_EARTH)  # radians
 
-    # offsets in [-dlon, dlon] and [-dlat, dlat]
+    # Seed grid: offsets in [-dlon, dlon] x [-dlat, dlat]
     xs = np.linspace(-dlon, dlon, nx, dtype=np.float32)
     ys = np.linspace(-dlat, dlat, ny, dtype=np.float32)
 
-    # mesh (ny,nx) then flatten
     xg, yg = np.meshgrid(xs, ys, indexing="xy")
     seed_lon = np.float32(lon0_rad) + xg
     seed_lat = np.float32(lat0_rad) + yg
@@ -371,7 +396,17 @@ def make_neighborhood(lon0_rad, lat0_rad, r_km, nx=9, ny=9):
 def _find_index_uniform(x, x0, dx, n):
     """
     Return i such that x is inside [x_i, x_{i+1}] for a uniform grid.
-    If x is out-of-range (cannot bracket), return -1.
+
+    Inputs
+    ------
+    x  : float, query value
+    x0 : float, grid start
+    dx : float, grid spacing
+    n  : int, number of grid points
+
+    Returns
+    -------
+    int, index or -1 if out-of-range
     """
     r = (x - x0) / dx  # continuous index
     i = int(np.floor(r))  # lower bracket index
@@ -393,15 +428,15 @@ def interp_trilinear_uv(time_sec, lat, lon, u, v, t, lat_q, lon_q):
     ------
     time_sec : 1D array [nt] (seconds since epoch 1950, int64)
     lat, lon : 1D arrays [nlat], [nlon] in radians (uniform spacing)
-    u, v     : 3D arrays [nt, nlat, nlon] in m/s
+    u, v     : 3D arrays [nt, nlat, nlon] in rad/s (lon_dot, lat_dot from prep_dataset)
     t        : scalar query time (seconds since epoch 1950, float64)
     lat_q,
     lon_q    : query positions (same shape), in radians
 
-    Output
-    ------
-    u_q, v_q : interpolated velocities (same shape as lat_q/lon_q)
-              out-of-domain -> NaN (handled later by mask logic).
+    Returns
+    -------
+    u_q, v_q : interpolated angular velocities (same shape as lat_q/lon_q), rad/s.
+               Out-of-domain points return NaN.
     """
     nt = time_sec.size
     nlat = lat.size
@@ -676,37 +711,35 @@ def luq_case(
     fill_invalid=np.nan,
 ):
     """
-    One LUQ case:
-      neighborhood -> advect -> great-circle distance to target -> mean.
+    Compute LUQ for one case: neighborhood → advect → distance to target → mean.
 
     Inputs
     ------
-    field: dict from prep_dataset
-    keys: time_sec, lat_rad, lon_rad, lon_dot, lat_dot
-    t0_sec: int64 seconds since epoch 1950
-    tau_sec: int/float seconds forward
-    dt_sec: int/float integration internal step (e.g. 7200)
-    lon0_rad, lat0_rad: float32 center (drifter at t0), radians
-    lon_target_rad, lat_target_rad: float32 target (drifter at t0+tau), radians
-    r_km: neighborhood half-size in km
-    nx, ny: neighborhood grid size
-    min_valid_frac: discard if too many seeds invalid
-    return_map: bool, if True returns full spatial map
-    fill_invalid: value for invalid grid points when return_map=True
+    field            : dict, output of prep_dataset
+    t0_sec           : int64, seconds since epoch 1950
+    tau_sec          : int/float, seconds forward
+    dt_sec           : int/float, RK4 time step in seconds (e.g. 3600)
+    lon0_rad, lat0_rad : float32, center (drifter at t0), radians
+    lon_target_rad, lat_target_rad : float32, target (drifter at t0+tau), radians
+    r_km             : float, neighborhood half-size in km
+    nx, ny           : int, neighborhood grid size
+    min_valid_frac   : float, discard if too many seeds invalid
+    return_map       : bool, if True returns full spatial map
+    fill_invalid     : value for invalid grid points when return_map=True
 
     Returns
     -------
-    If return_map=False (default):
-        luq_mean_km: float32 (NaN if not enough valid)
-        valid_frac: float32
+    If return_map=False:
+        luq_mean_km : float32, NaN if not enough valid
+        valid_frac  : float32
 
     If return_map=True:
-        luq_mean_km: float32 (NaN if not enough valid)
-        valid_frac: float32
-        seed_lon_grid: (ny,nx) array in radians
-        seed_lat_grid: (ny,nx) array in radians
-        LUQ_grid_km: (ny,nx) array LUQ values in km
-        valid_grid: (ny,nx) bool array
+        luq_mean_km : float32, NaN if not enough valid
+        valid_frac  : float32
+        seed_lon_grid : (ny,nx) array in radians
+        seed_lat_grid : (ny,nx) array in radians
+        LUQ_grid_km   : (ny,nx) array LUQ values in km
+        valid_grid    : (ny,nx) bool array
     """
     # 1) neighborhood seeds (float32 arrays)
     seed_lon, seed_lat = make_neighborhood(lon0_rad, lat0_rad, r_km, nx=nx, ny=ny)
@@ -728,18 +761,16 @@ def luq_case(
     valid_mask = valid == 1
     valid_frac = valid_mask.mean().astype(np.float32)
 
-    # 3) distances to target
+    # 3) distances to target (NaN / fill_invalid for invalid seeds)
     d = np.full(seed_lon.shape, fill_invalid, dtype=np.float32)
-    if valid_mask.sum() > 0:
+    if valid_frac >= min_valid_frac:
         d[valid_mask] = spherical_distance_km_acos(
             lonT[valid_mask], latT[valid_mask], lon_target_rad, lat_target_rad
         ).astype(np.float32)
-
-    # Mean calculation (only valid points)
-    if valid_mask.sum() == 0 or valid_frac < min_valid_frac:
-        luq_mean_km = np.float32(np.nan)
-    else:
+        # 4) mean over valid seeds
         luq_mean_km = np.nanmean(d[valid_mask]).astype(np.float32)
+    else:
+        luq_mean_km = np.float32(np.nan)
 
     # Return based on flag
     if not return_map:
@@ -763,22 +794,16 @@ def luq_case(
 
 def save_results_csv(results, output_dir, tau_days, r_kms, eval_start=None):
     """
-    Save results as CSV - one per drifter with structure:
-    - Summary section at top
-    - Time series section at bottom, grouped by dataset/r_km/tau
+    Write LUQ results to CSV, one file per drifter.
+    Layout: all summary rows first, then all timeseries rows below.
 
-    Parameters:
-    -----------
-    results : dict
-        The evaluation results to save
-    output_dir : str
-        The directory to save the CSV files
-    tau_days : list
-        The list of tau values in days
-    r_kms : list
-        The list of radius values in kilometers
-    eval_start : str, optional
-        The evaluation start date (YYYY-MM-DD) to include in the filename
+    Inputs
+    ------
+    results    : dict, output of run_evaluation
+    output_dir : str or Path
+    tau_days   : list of int
+    r_kms      : list of int
+    eval_start : str "YYYY-MM-DD", used in output filename
     """
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -788,82 +813,65 @@ def save_results_csv(results, output_dir, tau_days, r_kms, eval_start=None):
             continue
 
         filename = drifter_results["filename"]
-        L_char = drifter_results["L_characteristic_km"]
 
         # Get date string for output filename
-        date_str = str(eval_start)
+        date_str = eval_start if eval_start is not None else "xxx"
 
         all_rows = []
-
-        # === SUMMARY SECTION ===
-        summary_rows = []
+        timeseries_rows = []
         for dataset_name in drifter_results.keys():
-            if dataset_name in ["filename", "L_characteristic_km"]:
+            if dataset_name == "filename":
                 continue
-
             for r_km in r_kms:
                 for tau_day in tau_days:
                     tau_sec = np.int64(tau_day * 24 * 3600)
-
-                    if (
-                        r_km in drifter_results[dataset_name]
-                        and tau_sec in drifter_results[dataset_name][r_km]
-                    ):
-                        data = drifter_results[dataset_name][r_km][tau_sec]
-                        summary_rows.append(
+                    if r_km not in drifter_results[dataset_name]:
+                        continue
+                    if tau_sec not in drifter_results[dataset_name][r_km]:
+                        continue
+                    data = drifter_results[dataset_name][r_km][tau_sec]
+                    L_char = data["L_characteristic_km"]
+                    # Summary row
+                    all_rows.append(
+                        {
+                            "data_type": "summary",
+                            "drifter_id": drifter_idx,
+                            "drifter_filename": filename,
+                            "dataset": dataset_name,
+                            "r_km": r_km,
+                            "tau_days": tau_day,
+                            "t0_datetime": "",
+                            "luq_km": data["luq_mean_km"],
+                            "luq_normalized": data["luq_normalized"],
+                            "valid_frac": data["valid_frac"],
+                            "n_cases": data["n_cases"],
+                            "L_characteristic_km": L_char,
+                        }
+                    )
+                    # Collect timeseries rows separately
+                    for calc in data.get("individual_calculations", []):
+                        timeseries_rows.append(
                             {
-                                "data_type": "summary",
+                                "data_type": "timeseries",
                                 "drifter_id": drifter_idx,
                                 "drifter_filename": filename,
                                 "dataset": dataset_name,
                                 "r_km": r_km,
                                 "tau_days": tau_day,
-                                "t0_datetime": "",  # Empty for summary
-                                "luq_km": data["luq_mean_km"],
-                                "luq_normalized": data["luq_normalized"],
-                                "valid_frac": data["valid_frac"],
-                                "n_cases": data["n_cases"],
+                                "t0_datetime": calc["t0_datetime"].strftime(
+                                    "%Y-%m-%d %H:%M:%S"
+                                ),
+                                "lon0_deg": calc["lon0_deg"],
+                                "lat0_deg": calc["lat0_deg"],
+                                "luq_km": calc["luq_km"],
+                                "luq_normalized": calc["luq_normalized"],
+                                "valid_frac": calc["valid_frac"],
+                                "n_cases": "",
                                 "L_characteristic_km": L_char,
                             }
                         )
-
-        all_rows.extend(summary_rows)
-
-        # === TIME SERIES SECTION ===
-        for dataset_name in drifter_results.keys():
-            if dataset_name in ["filename", "L_characteristic_km"]:
-                continue
-
-            for r_km in r_kms:
-                for tau_day in tau_days:
-                    tau_sec = np.int64(tau_day * 24 * 3600)
-
-                    if (
-                        r_km in drifter_results[dataset_name]
-                        and tau_sec in drifter_results[dataset_name][r_km]
-                    ):
-                        data = drifter_results[dataset_name][r_km][tau_sec]
-                        individual_calcs = data.get("individual_calculations", [])
-
-                        for calc in individual_calcs:
-                            all_rows.append(
-                                {
-                                    "data_type": "timeseries",
-                                    "drifter_id": drifter_idx,
-                                    "drifter_filename": filename,
-                                    "dataset": dataset_name,
-                                    "r_km": r_km,
-                                    "tau_days": tau_day,
-                                    "t0_datetime": calc["t0_datetime"].strftime(
-                                        "%Y-%m-%d %H:%M:%S"
-                                    ),
-                                    "luq_km": calc["luq_km"],
-                                    "luq_normalized": calc["luq_normalized"],
-                                    "valid_frac": calc["valid_frac"],
-                                    "n_cases": "",  # Empty for individual points
-                                    "L_characteristic_km": L_char,
-                                }
-                            )
+        # Summary rows first, then all timeseries rows below
+        all_rows.extend(timeseries_rows)
 
         if all_rows:
             df = pd.DataFrame(all_rows)
@@ -878,11 +886,119 @@ def save_results_csv(results, output_dir, tau_days, r_kms, eval_start=None):
                 sep=";",
                 encoding="utf-8-sig",
             )
-
-            n_summary = len([r for r in all_rows if r["data_type"] == "summary"])
-            n_timeseries = len([r for r in all_rows if r["data_type"] == "timeseries"])
+            n_summary = len(all_rows) - len(timeseries_rows)
             print(
-                f"  ✓ {output_file.name} ({n_summary} summary + {n_timeseries} timeseries records)"
+                f"  ✓ {output_file.name} ({n_summary} summary + {len(timeseries_rows)} timeseries records)"
             )
 
-    print(f"\n Expanded CSV results saved to: {output_dir}")
+
+def compute_M(field, t0_sec, tau_sec, dt_sec, lon_grid_rad, lat_grid_rad):
+    """
+    Compute Lagrangian descriptor M on a grid of initial conditions.
+    Forward integration only, from t0_sec over tau_sec.
+    Step metric: spherical arc-length sqrt(dlat² + (cos(lat_mid)·dlon)²).
+
+    Inputs
+    ------
+    field        : dict, output of prep_dataset
+    t0_sec       : int64, integration start in epoch seconds
+    tau_sec      : int/float, integration window in seconds
+    dt_sec       : int/float, time step in seconds
+    lon_grid_rad : 1D float32 array, longitude grid in radians
+    lat_grid_rad : 1D float32 array, latitude grid in radians
+
+    Returns
+    -------
+    M : float64 array (nlat, nlon)
+    """
+    nsteps = int(np.ceil(tau_sec / dt_sec))
+    nlat = len(lat_grid_rad)
+    nlon = len(lon_grid_rad)
+
+    # Initial condition meshgrid: lat[j, i], lon[j, i]
+    lon_mesh, lat_mesh = np.meshgrid(lon_grid_rad, lat_grid_rad)  # (nlat, nlon)
+    lon = lon_mesh.astype(np.float32)
+    lat = lat_mesh.astype(np.float32)
+
+    M_acc = np.zeros((nlat, nlon), dtype=np.float64)
+    t = np.float64(t0_sec)
+
+    for step in range(nsteps):
+        dt = np.float64(dt_sec)
+        if step == nsteps - 1:
+            rem = np.float64(tau_sec - (nsteps - 1) * dt_sec)
+            if rem > 0:
+                dt = rem
+
+        # RK4 stages using interp_trilinear_uv (lon_dot, lat_dot in rad/s).
+        # NaN (land/out-of-domain) → 0: particle stays put that step.
+        k1_lon, k1_lat = interp_trilinear_uv(
+            field["time_sec"],
+            field["lat_rad"],
+            field["lon_rad"],
+            field["lon_dot"],
+            field["lat_dot"],
+            t,
+            lat,
+            lon,
+        )
+        k1_lon = np.nan_to_num(k1_lon)
+        k1_lat = np.nan_to_num(k1_lat)
+
+        k2_lon, k2_lat = interp_trilinear_uv(
+            field["time_sec"],
+            field["lat_rad"],
+            field["lon_rad"],
+            field["lon_dot"],
+            field["lat_dot"],
+            t + 0.5 * dt,
+            lat + np.float32(0.5 * dt) * k1_lat,
+            lon + np.float32(0.5 * dt) * k1_lon,
+        )
+        k2_lon = np.nan_to_num(k2_lon)
+        k2_lat = np.nan_to_num(k2_lat)
+
+        k3_lon, k3_lat = interp_trilinear_uv(
+            field["time_sec"],
+            field["lat_rad"],
+            field["lon_rad"],
+            field["lon_dot"],
+            field["lat_dot"],
+            t + 0.5 * dt,
+            lat + np.float32(0.5 * dt) * k2_lat,
+            lon + np.float32(0.5 * dt) * k2_lon,
+        )
+        k3_lon = np.nan_to_num(k3_lon)
+        k3_lat = np.nan_to_num(k3_lat)
+
+        k4_lon, k4_lat = interp_trilinear_uv(
+            field["time_sec"],
+            field["lat_rad"],
+            field["lon_rad"],
+            field["lon_dot"],
+            field["lat_dot"],
+            t + dt,
+            lat + np.float32(dt) * k3_lat,
+            lon + np.float32(dt) * k3_lon,
+        )
+        k4_lon = np.nan_to_num(k4_lon)
+        k4_lat = np.nan_to_num(k4_lat)
+
+        dlon = np.float32(dt / 6.0) * (k1_lon + 2 * k2_lon + 2 * k3_lon + k4_lon)
+        dlat = np.float32(dt / 6.0) * (k1_lat + 2 * k2_lat + 2 * k3_lat + k4_lat)
+
+        lon_new = lon + dlon
+        lat_new = lat + dlat
+
+        # Spherical arc-length of this step
+        lat_mid = 0.5 * (lat + lat_new)
+        step_arc = np.sqrt(dlat**2 + (np.cos(lat_mid) * dlon) ** 2)
+
+        # Freeze bad points (out-of-domain or NaN): contribute 0 to M
+        bad = ~np.isfinite(step_arc) | ~np.isfinite(lon_new) | ~np.isfinite(lat_new)
+        M_acc += np.where(bad, 0.0, step_arc).astype(np.float64)
+        lon = np.where(bad, lon, lon_new)
+        lat = np.where(bad, lat, lat_new)
+        t += dt
+
+    return M_acc

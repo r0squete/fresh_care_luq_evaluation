@@ -22,7 +22,7 @@ from utils import (
     prep_dataset,
     prep_drifter,
     save_results_csv,
-    validate_temporal_coverage,
+    to_epoch_seconds_datetime64,
 )
 
 
@@ -39,7 +39,7 @@ def parse_arguments():
         nargs="+",
         choices=list(DATASETS.keys()),
         default=list(DATASETS.keys()),
-        help="Datasets to evaluate (default: all configured datasets)",
+        help="Datasets to evaluate",
     )
 
     # Temporal parameters
@@ -48,7 +48,7 @@ def parse_arguments():
         nargs="+",
         type=int,
         default=EVAL_PARAMS["tau_days"],
-        help=f"Integration times in days (default: {EVAL_PARAMS['tau_days']})",
+        help="Integration times in days",
     )
 
     # Spatial parameters
@@ -57,37 +57,36 @@ def parse_arguments():
         nargs="+",
         type=int,
         default=EVAL_PARAMS["r_kms"],
-        help=f"Neighborhood radii in km (default: {EVAL_PARAMS['r_kms']})",
+        help="Neighborhood radii in km",
     )
 
     # Temporal range filtering
     parser.add_argument(
         "--eval_start",
         type=str,
-        default=None,
-        help="Start date for evaluation (YYYY-MM-DD, default: use all available)",
+        required=True,
+        help="Start date for evaluation (YYYY-MM-DD)",
     )
 
     parser.add_argument(
         "--eval_end",
         type=str,
-        default=None,
-        help="End date for evaluation (YYYY-MM-DD, default: use all available)",
+        required=True,
+        help="End date for evaluation (YYYY-MM-DD)",
     )
 
     # File selection
     parser.add_argument(
         "--drifter_files",
         nargs="+",
-        default=None,
-        help="Specific drifter files to process (default: all in directory)",
+        help="Specific drifter files in <directory> to process, (default: all .csv in <drifters directory)",
     )
 
     parser.add_argument(
         "--output_dir",
         type=str,
         default=OUTPUT_PATH,
-        help=f"Output directory (default: {OUTPUT_PATH})",
+        help="Output directory",
     )
 
     # Technical parameters
@@ -95,28 +94,28 @@ def parse_arguments():
         "--dt_sec",
         type=int,
         default=EVAL_PARAMS["dt_sec"],
-        help=f"Integration time step in seconds (default: {EVAL_PARAMS['dt_sec']})",
+        help="Integration time step in seconds",
     )
 
     parser.add_argument(
         "--nx",
         type=int,
         default=EVAL_PARAMS["nx"],
-        help=f"Neighborhood grid points X (default: {EVAL_PARAMS['nx']})",
+        help="Neighborhood grid points X",
     )
 
     parser.add_argument(
         "--ny",
         type=int,
         default=EVAL_PARAMS["ny"],
-        help=f"Neighborhood grid points Y (default: {EVAL_PARAMS['ny']})",
+        help="Neighborhood grid points Y",
     )
 
     parser.add_argument(
         "--min_valid_frac",
         type=float,
         default=EVAL_PARAMS["min_valid_frac"],
-        help=f"Minimum valid fraction for seeds (default: {EVAL_PARAMS['min_valid_frac']})",
+        help="Minimum valid fraction for seeds",
     )
 
     # Utility flags
@@ -159,9 +158,9 @@ def run_evaluation(
         Specific drifter files to process (default: all in directory)
     output_dir : str/Path, optional
         Output directory (default: from config)
-    eval_start : str, optional
+    eval_start : str, required
         Start date for evaluation "YYYY-MM-DD"
-    eval_end : str, optional
+    eval_end : str, required
         End date for evaluation "YYYY-MM-DD"
     dry_run : bool, optional
         If True, only show what would be evaluated
@@ -172,6 +171,8 @@ def run_evaluation(
     --------
     dict : LUQ evaluation results (None if dry_run=True)
     """
+    if eval_start is None or eval_end is None:
+        raise ValueError("eval_start and eval_end are required")
 
     # Use config defaults or override
     if datasets_to_eval is None:
@@ -199,8 +200,7 @@ def run_evaluation(
     print(f"tau_days: {tau_days}")
     print(f"r_kms: {r_kms}")
     print(f"Integration step: {dt_sec}s, Grid: {nx}x{ny}, Min valid: {min_valid_frac}")
-    if eval_start or eval_end:
-        print(f"Temporal range: {eval_start or 'start'} to {eval_end or 'end'}")
+    print(f"Temporal range: {eval_start} to {eval_end}")
     if drifter_files:
         print(f"Specific drifter files: {len(drifter_files)} files")
     print(f"Output directory: {output_dir}")
@@ -210,15 +210,13 @@ def run_evaluation(
         return None
 
     # 1) Load and validate datasets
-    print("\n=== Loading Datasets ===")
     datasets = {}
     for name in datasets_to_eval:
         if name not in DATASETS:
             print(f"Warning: Dataset {name} not found in config")
             continue
-
-        print(f"Loading {name}...")
         try:
+            print(f"Loading dataset: {name}")
             ds = load_dataset_files(
                 DATASETS[name]["path"],
                 eval_start=eval_start,
@@ -233,16 +231,14 @@ def run_evaluation(
                 lat_name=DATASETS[name]["lat_name"],
                 lon_name=DATASETS[name]["lon_name"],
             )
-            print(f"  ✓ Loaded {name}: {len(datasets[name]['time_sec'])} time steps")
+
         except Exception as e:
             print(f"  ✗ Failed to load {name}: {e}")
             continue
-
     if not datasets:
         raise ValueError("No datasets loaded successfully")
 
     # 2) Load and validate drifters
-    print("\n=== Loading Drifters ===")
     drifters_path = Path(DRIFTERS_PATH)
 
     if drifter_files is None:
@@ -255,8 +251,6 @@ def run_evaluation(
         drifter_files = [drifters_path / f for f in drifter_files]
 
     print(f"Found {len(drifter_files)} drifter files")
-
-    # Load and validate drifters
     valid_drifters = {}
     for i, drifter_file in enumerate(drifter_files):
         try:
@@ -268,104 +262,111 @@ def run_evaluation(
                 lat_col=DRIFTER_COLUMNS["lat_col"],
             )
 
-            # Apply temporal filtering if specified
-            filtered_data = filter_by_temporal_range(drifter_data, eval_start, eval_end)
+            # Apply temporal filtering to eval window
+            filtered_data = filter_by_temporal_range(
+                drifter_data, eval_start, eval_end, tau_max_sec
+            )
             if filtered_data is None:
                 print(
                     f"  ✗ Drifter {drifter_file.name} - no data in specified temporal range"
                 )
                 continue
-
-            # Use filtered data for validation
+            print(
+                f"  ✓ Drifter {drifter_file.name} - {len(filtered_data['time_sec'])} records in specified temporal range"
+            )
             drifter_data = filtered_data
 
-            # Validate temporal coverage against each dataset
+            # Clip drifter to each field's temporal range and validate coverage
             valid_for_datasets = {}
             for dataset_name, field in datasets.items():
-                is_valid, msg = validate_temporal_coverage(
-                    drifter_data, field, tau_max_sec
+                drifter_for_field = filter_by_temporal_range(
+                    drifter_data,
+                    eval_start,
+                    eval_end,
+                    tau_max_sec,
+                    field_start_sec=field["time_sec"][0],
+                    field_end_sec=field["time_sec"][-1],
                 )
-                if is_valid:
-                    valid_for_datasets[dataset_name] = True
-                else:
+                if drifter_for_field is None:
                     print(
-                        f"  Drifter {drifter_file.name} invalid for {dataset_name}: {msg}"
+                        f"  ✗ Drifter {drifter_file.name} - insufficient coverage for '{dataset_name}'"
                     )
+                    continue
+
+                valid_for_datasets[dataset_name] = drifter_for_field
 
             if valid_for_datasets:
                 valid_drifters[i] = {
                     "data": drifter_data,
                     "filename": drifter_file.name,
                     "valid_datasets": list(valid_for_datasets.keys()),
+                    "clipped_data": valid_for_datasets,
                 }
-                print(
-                    f"  ✓ Drifter {i:03d}: {drifter_file.name} ({len(drifter_data['time_sec'])} points) - valid for {len(valid_for_datasets)} datasets"
-                )
-            else:
-                print(f"  ✗ Drifter {drifter_file.name} - no valid datasets")
 
         except Exception as e:
             print(f"  ✗ Failed to load {drifter_file.name}: {e}")
             continue
-
+    print(f"Proceeding with {len(valid_drifters)} valid drifters")
     if not valid_drifters:
         raise ValueError("No valid drifters found")
+    print("Running LUQ Evaluation...")
 
-    print(f"Proceeding with {len(valid_drifters)} valid drifters")
+    # Pre-compute t0 iteration bounds (same for all drifters/datasets/tau)
+    t0_start_sec = int(
+        to_epoch_seconds_datetime64(
+            np.array([pd.Timestamp(eval_start).to_datetime64().astype("datetime64[s]")])
+        )[0]
+    )
+    t0_end_sec = int(
+        to_epoch_seconds_datetime64(
+            np.array([pd.Timestamp(eval_end).to_datetime64().astype("datetime64[s]")])
+        )[0]
+    )
 
-    # 3) Run LUQ evaluation
-    print("\n=== Running LUQ Evaluation ===")
     LUQ_results = {}
-
     for drifter_idx, drifter_info in valid_drifters.items():
-        print(f"Processing drifter {drifter_idx:03d}: {drifter_info['filename']}")
-
-        drifter = drifter_info["data"]
+        print(f"[EVAL] Drifter {drifter_idx:03d}: {drifter_info['filename']}")
+        # L_char is a single spatial scale for the drifter, computed on the
+        # eval-window-clipped trajectory.
+        L_char = L_characteristic_km(
+            drifter_info["data"]["lon_rad"], drifter_info["data"]["lat_rad"]
+        )
         LUQ_results[drifter_idx] = {
             "filename": drifter_info["filename"],
-            "L_characteristic_km": L_characteristic_km(
-                drifter["lon_rad"], drifter["lat_rad"]
-            ),
         }
-
         for dataset_name in drifter_info["valid_datasets"]:
             field = datasets[dataset_name]
+            drifter = drifter_info["clipped_data"][dataset_name]
             LUQ_results[drifter_idx][dataset_name] = {}
-
             for r_km in r_kms:
                 LUQ_results[drifter_idx][dataset_name][r_km] = {}
-
                 for tau_sec in tau_secs:
                     luq_values = []
                     valid_fracs = []
-                    individual_calculations = []  # Store individual calculations
+                    individual_calculations = []
                     n_cases = 0
 
-                    # Loop through all drifter positions
-                    for i in range(len(drifter["time_sec"])):
-                        t0_sec = drifter["time_sec"][i]
-                        t1_sec = t0_sec + tau_sec
-
-                        # Check if final time is within dataset range
+                    # Iterate t0 over [eval_start, eval_end] in 1-day steps.
+                    for t0_sec in range(t0_start_sec, t0_end_sec + 1, 86400):
+                        t0 = np.int64(t0_sec)
+                        t1_sec = t0 + tau_sec
+                        idx0_candidates = np.where(drifter["time_sec"] == t0)[0]
+                        if len(idx0_candidates) == 0:
+                            continue
                         if t1_sec > field["time_sec"][-1]:
                             continue
-
-                        # Check if drifter has data at t1
                         idx1_candidates = np.where(drifter["time_sec"] == t1_sec)[0]
                         if len(idx1_candidates) == 0:
                             continue
                         idx1 = idx1_candidates[0]
-
-                        # Get positions
-                        lon0_rad = drifter["lon_rad"][i]
-                        lat0_rad = drifter["lat_rad"][i]
+                        idx0 = idx0_candidates[0]
+                        lon0_rad = drifter["lon_rad"][idx0]
+                        lat0_rad = drifter["lat_rad"][idx0]
                         lon_target_rad = drifter["lon_rad"][idx1]
                         lat_target_rad = drifter["lat_rad"][idx1]
-
-                        # Compute LUQ for this case
                         luq_mean_km, valid_frac = luq_case(
                             field,
-                            t0_sec,
+                            t0,
                             tau_sec,
                             dt_sec,
                             lon0_rad,
@@ -377,37 +378,35 @@ def run_evaluation(
                             ny=ny,
                             min_valid_frac=min_valid_frac,
                         )
-
+                        t0_datetime = pd.Timestamp("1950-01-01") + pd.Timedelta(
+                            seconds=int(t0)
+                        )
+                        luq_normalized = (
+                            luq_mean_km / L_char
+                            if (not np.isnan(luq_mean_km) and L_char > 0)
+                            else np.nan
+                        )
+                        # Always record the timestep in the time series,
+                        # even if valid_frac < min_valid_frac (luq_km = NaN).
+                        individual_calculations.append(
+                            {
+                                "t0_datetime": t0_datetime,
+                                "lon0_deg": float(np.rad2deg(lon0_rad)),
+                                "lat0_deg": float(np.rad2deg(lat0_rad)),
+                                "luq_km": luq_mean_km,
+                                "luq_normalized": luq_normalized,
+                                "valid_frac": valid_frac,
+                            }
+                        )
+                        # Only valid cases contribute to the aggregate mean.
                         if not np.isnan(luq_mean_km):
                             luq_values.append(luq_mean_km)
                             valid_fracs.append(valid_frac)
                             n_cases += 1
-
-                            # Store individual calculation for CSV
-                            L_char = LUQ_results[drifter_idx]["L_characteristic_km"]
-                            luq_normalized = (
-                                luq_mean_km / L_char if L_char > 0 else np.nan
-                            )
-
-                            # Convert time to datetime for CSV
-                            t0_datetime = pd.to_datetime(
-                                t0_sec, origin="1950-01-01", unit="s"
-                            )  # Proper conversion from 1950 epoch
-
-                            individual_calculations.append(
-                                {
-                                    "t0_datetime": t0_datetime,
-                                    "luq_km": luq_mean_km,
-                                    "luq_normalized": luq_normalized,
-                                    "valid_frac": valid_frac,
-                                }
-                            )
-
-                    # Aggregate results for this drifter-dataset-r_km-tau combination
+                    # Aggregate results
                     if n_cases > 0:
                         luq_mean_over_cases = np.mean(luq_values).astype(np.float32)
                         valid_frac_over_cases = np.mean(valid_fracs).astype(np.float32)
-                        L_char = LUQ_results[drifter_idx]["L_characteristic_km"]
                         luq_normalized = (
                             luq_mean_over_cases / L_char if L_char > 0 else np.nan
                         )
@@ -415,19 +414,17 @@ def run_evaluation(
                         luq_mean_over_cases = np.float32(np.nan)
                         valid_frac_over_cases = np.float32(0.0)
                         luq_normalized = np.nan
-
                     LUQ_results[drifter_idx][dataset_name][r_km][tau_sec] = {
                         "luq_mean_km": luq_mean_over_cases,
                         "luq_normalized": luq_normalized,
                         "valid_frac": valid_frac_over_cases,
                         "n_cases": n_cases,
-                        "individual_calculations": individual_calculations,  # Add individual data
+                        "L_characteristic_km": L_char,
+                        "individual_calculations": individual_calculations,
                     }
-
-    # 4) Save results
+    print("LUQ evaluation finished.")
     print("\n=== Saving Results ===")
     save_results_csv(LUQ_results, output_dir, tau_days, r_kms, eval_start=eval_start)
-
     return LUQ_results
 
 
@@ -442,11 +439,10 @@ if __name__ == "__main__":
         exit(0)
 
     # Convert args to function parameters
-    kwargs = {}
-    for param in ["dt_sec", "nx", "ny", "min_valid_frac"]:
-        value = getattr(args, param, None)
-        if value is not None:
-            kwargs[param] = value
+    kwargs = {
+        param: getattr(args, param)
+        for param in ["dt_sec", "nx", "ny", "min_valid_frac"]
+    }
 
     # Run evaluation
     results = run_evaluation(
