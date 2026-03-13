@@ -18,7 +18,7 @@ EVAL_PARAMS = {
     "dt_sec": 3600,
     "nx": 100,
     "ny": 100,
-    "min_valid_frac": 0.9,
+    "min_valid_frac": 0.75,
 }
 
 # Dataset paths and configurations
@@ -47,18 +47,26 @@ DATASETS = {
         "lat_name": "latitude",
         "lon_name": "longitude",
     },
-    # "ADT-0.25": {
-    #     "path": "/home/rosquete/Documents/FRESH-CARE/data/fusion_results/ADT-0.25",
-    #     "u_name": "ugos",
-    #     "v_name": "vgos",
-    #     "time_name": "time",
-    #     "lat_name": "lat",
-    #     "lon_name": "lon",
-    # },
-    "OSCAR": {
-        "path": "/home/rosquete/Documents/FRESH-CARE/data/other_datasets/OSCAR/data/selected_region",
+    "ADT-0.25": {
+        "path": "/home/rosquete/Documents/FRESH-CARE/data/fusion_results/ADT-0.25",
+        "u_name": "ugos",
+        "v_name": "vgos",
+        "time_name": "time",
+        "lat_name": "lat",
+        "lon_name": "lon",
+    },
+    "OSCAR-total": {
+        "path": "/home/rosquete/Documents/FRESH-CARE/data/other_datasets/OSCAR/data/original",
         "u_name": "u",
         "v_name": "v",
+        "time_name": "time",
+        "lat_name": "lat",
+        "lon_name": "lon",
+    },
+    "OSCAR-geos": {
+        "path": "/home/rosquete/Documents/FRESH-CARE/data/other_datasets/OSCAR/data/original",
+        "u_name": "ug",
+        "v_name": "vg",
         "time_name": "time",
         "lat_name": "lat",
         "lon_name": "lon",
