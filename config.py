@@ -14,7 +14,7 @@ EPOCH = np.datetime64("1950-01-01T00:00:00", "s")
 # Evaluation parameters
 EVAL_PARAMS = {
     "tau_days": [5, 10, 15],
-    "r_kms": [5, 10, 15],
+    "r_kms": [10, 20, 40],
     "dt_sec": 3600,
     "nx": 100,
     "ny": 100,
@@ -24,7 +24,7 @@ EVAL_PARAMS = {
 # Dataset paths and configurations
 DATASETS = {
     "ADT-SST": {
-        "path": "/home/rosquete/Documents/FRESH-CARE/data/fusion_results/ADT-SST",
+        "path": "/home/rosquete/Documents/FRESH-CARE/data/fusion_results/currents/ADT-SST",
         "u_name": "ug",
         "v_name": "vg",
         "time_name": "time",
@@ -32,7 +32,7 @@ DATASETS = {
         "lon_name": "lon",
     },
     "ADT-SSS": {
-        "path": "/home/rosquete/Documents/FRESH-CARE/data/fusion_results/ADT-SSS",
+        "path": "/home/rosquete/Documents/FRESH-CARE/data/fusion_results/currents/ADT-SSS",
         "u_name": "ug",
         "v_name": "vg",
         "time_name": "time",
@@ -40,7 +40,7 @@ DATASETS = {
         "lon_name": "lon",
     },
     "ADT-0.05": {
-        "path": "/home/rosquete/Documents/FRESH-CARE/data/fusion_results/ADT-0.05",
+        "path": "/home/rosquete/Documents/FRESH-CARE/data/fusion_results/currents/ADT-0.05",
         "u_name": "ugos",
         "v_name": "vgos",
         "time_name": "time",
@@ -48,7 +48,7 @@ DATASETS = {
         "lon_name": "longitude",
     },
     "ADT-0.25": {
-        "path": "/home/rosquete/Documents/FRESH-CARE/data/fusion_results/ADT-0.25",
+        "path": "/home/rosquete/Documents/FRESH-CARE/data/fusion_results/currents/ADT-0.25",
         "u_name": "ugos",
         "v_name": "vgos",
         "time_name": "time",
@@ -56,7 +56,7 @@ DATASETS = {
         "lon_name": "lon",
     },
     "OSCAR-total": {
-        "path": "/home/rosquete/Documents/FRESH-CARE/data/other_datasets/OSCAR/data/original",
+        "path": "/home/rosquete/Documents/FRESH-CARE/data/other_datasets/OSCAR/data",
         "u_name": "u",
         "v_name": "v",
         "time_name": "time",
@@ -64,7 +64,7 @@ DATASETS = {
         "lon_name": "lon",
     },
     "OSCAR-geos": {
-        "path": "/home/rosquete/Documents/FRESH-CARE/data/other_datasets/OSCAR/data/original",
+        "path": "/home/rosquete/Documents/FRESH-CARE/data/other_datasets/OSCAR/data",
         "u_name": "ug",
         "v_name": "vg",
         "time_name": "time",

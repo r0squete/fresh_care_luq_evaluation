@@ -326,11 +326,11 @@ def run_evaluation(
     LUQ_results = {}
     for drifter_idx, drifter_info in valid_drifters.items():
         print(f"[EVAL] Drifter {drifter_idx:03d}: {drifter_info['filename']}")
-        # L_char is a single spatial scale for the drifter, computed on the
-        # eval-window-clipped trajectory.
-        L_char = L_characteristic_km(
-            drifter_info["data"]["lon_rad"], drifter_info["data"]["lat_rad"]
-        )
+        # L_char: max spatial extent of the drifter trajectory during the
+        # evaluation window [eval_start, eval_end] only.
+        _d = drifter_info["data"]
+        _t0_mask = (_d["time_sec"] >= t0_start_sec) & (_d["time_sec"] <= t0_end_sec)
+        L_char = L_characteristic_km(_d["lon_rad"][_t0_mask], _d["lat_rad"][_t0_mask])
         LUQ_results[drifter_idx] = {
             "filename": drifter_info["filename"],
         }

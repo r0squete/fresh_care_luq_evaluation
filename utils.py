@@ -322,6 +322,7 @@ def spherical_distance_km_acos(lon1, lat1, lon2, lat2):
 def L_characteristic_km(lon_rad, lat_rad, i0=0, i1=None, dist_fn=None):
     """
     Compute L = max great-circle distance between any two drifter positions.
+    This represents the maximum extent of the region that the drifter has visited.
 
     Inputs
     ------
@@ -348,12 +349,12 @@ def L_characteristic_km(lon_rad, lat_rad, i0=0, i1=None, dist_fn=None):
         return 0.0
 
     Lmax = 0.0
-    for i in range(n - 1):
-        # Vectorized distances from point i to all subsequent points
-        d = dist_fn(lon[i + 1 :], lat[i + 1 :], lon[i], lat[i])
-        m = np.nanmax(d)
-        if m > Lmax:
-            Lmax = float(m)
+    # Calculate all pairwise distances efficiently
+    for i in range(n):
+        for j in range(i + 1, n):
+            d = dist_fn(lon[j], lat[j], lon[i], lat[i])
+            if d > Lmax:
+                Lmax = float(d)
 
     return Lmax
 
