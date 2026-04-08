@@ -364,6 +364,8 @@ def main():
             else None,
         )
         if fig:
+            # Use 'best' location for legend to avoid covering lines
+            ax.legend(fontsize=12, loc="best")
             plt.show()
             plt.close(fig)
 
@@ -606,7 +608,7 @@ def main():
                     plt.tight_layout()
                     plt.show()
                     if args.save_plots:
-                        out = f"{args.output_dir}map_M_{drifter_id_map}_t0{t0_tag}_tau{args.tau_days}_{name}.png"
+                        out = f"{args.output_dir}map_M_{drifter_id_map}_t0{t0_tag}_tau{args.tau_days}_r{args.r_km}_{name}.png"
                         fig.savefig(out, dpi=300, bbox_inches="tight")
                         print(f"  Saved: {out}")
                     plt.close(fig)
